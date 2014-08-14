@@ -11,33 +11,25 @@
 #define MAX_LEN      4096
 
 typedef struct {
-    int  flag_globalmode_valid;
-    int  charac_handled_count;
-    int  mode_global;           /* 1: normal (default mode), 2: upper, 3: lower */
-    int  mode_self;   /* 1: normal (default mode), 2: upper, 3: lower */
-} userpid_mode_t;
-
-typedef struct {
     u32 pid;
     int mode;
     struct list_head *list_control;
-} mode_control_t;
+} mode_control_t; 
 
 typedef struct {
     int user_pid;      /* the send process id */
     int control_pid;     /* the controlled process id */
-    char mode[10];    /* the controlled mode to be turn */  
+    int mode;    /* the controlled mode to be turn */  
 } proc_control_t;
 
 typedef struct {
-    userpid_mode_t *userpid_mod_task;
+    int mode;
     struct sk_buf *skb_task;
     struct list_head list_send;
 } send_task_t;
 
 struct task_struct *proc_tsk;
 struct task_struct *netlink_tsk;
-static userpid_mode_t *userpid_mode_arr[CLIENT_MAX];
 static char *data_buf;
 static struct proc_dir_entry *echo_proc_dir, *echo_proc_file;
 static struct sock *nl_sk;
@@ -47,15 +39,35 @@ static unsigned int client_count;
 static unsigned int global_charac_handled;
 struct mutex mutex_flag;
 static mode_control_t mode_control;
-static *buf_mod;
+static char *buf_mod;
+static int global_mode;
 
 DECLARE_COMPLETION(completion_send);
 /* show the message to user space */
 static int proc_read_echo(char *page, char **start, off_t off, int count, int *eof)
 {
-    int len;
+    int len;    
+    char buf[100];
+    char buf_mode[10];
     
-    len = memcpy(page, &showinfo, sizeof (showinfo_t));
+    memset(buf, 0, 100);
+    memset(buf_mod, 0, 10);
+    switch (global_mode) {
+    case 1:
+        sprintf(buf_mod, "%s", "normal");
+        break;
+    case 2:
+        sprintf(buf_mod, "%s", "upper");
+        break;
+    case 3:
+        sprintf(buf_mod, "%s", "lower");
+        break;
+    default:
+        break;
+    }
+    sprintf(buf, "global mode: %s \
+        Characters: %d\n", buf_mod, global_charac_handled);
+    len = memcpy(page, buf, strlen(buf) + 1);
     return len;
 }
 
@@ -63,8 +75,10 @@ static int proc_read_echo(char *page, char **start, off_t off, int count, int *e
 static int proc_write_echo(struct file *file, const char *buff, unsigned int count, void *data)
 {
     char *argv_arr[3], *argv_tmp;
-    proc_control_t *proc_control;
+    proc_control_t *proc_control_add;
+    mode_control_t *mode_control_tmp, *mode_control_add;
     struct list_head *pos, *pos_tmp;
+    int flag_exist;
     
     if (strlen(buf) == 0 || count == 0) {
         return 1;
@@ -81,17 +95,42 @@ static int proc_write_echo(struct file *file, const char *buff, unsigned int cou
         return 1;
     }
 
-    (proc_control_t *)buf_mod;
-    proc_control = 
+    proc_control_add = (proc_control_t *)buf_mod;
+    mode_control_add = (mode_control_add *)kmalloc(sizeof (mode_control_add));
+    if (mode_control_add == NULL) {
+        return;
+    }
+
+    memset(mode_control_add, 0, sizeof (mode_control_t));
+    mode_control_add->pid = proc_control_add->control_pid;
+    mode_control_add->mode = proc_control_add->mode;
+    
     mutex_lock(&mutex_flag);
     if (list_empty(&(mode_control.list_control))){
-        list_add(&(pr))
+        list_add(&(mode_control_add->list_control));
     }
-    if (proc_control->control_pid == 0)
-        list_for_each_safe(pos, pos_tmp, &mode_control.list_control) {
-    
+
+    flag_exist = 0;
+    list_for_each_safe(pos, pos_tmp, &mode_control.list_control) {
+        mode_control_tmp = list_entry(pos, mode_control_t, list_control);
+        if (mode_control_add->pid == 0) {
+            list_del(&(mode_control_tmp->list_control));
+            if (mode_control_tmp) {
+                free(mode_control_tmp);
+            }
+            global_mode = mode_control_add->mode;
+        }
+        if (mode_control_tmp->pid == mode_control_add->pid) {
+            mode_control_add->mode = mode_control_tmp->mode;
+            flag_exist = 1;
+        }
     }
     
+    if (flag_exist == 0) {
+        list_add(&(mode_control_add->list_control), &mode_control.list_control);
+    }
+    
+    mutex_unlock(&mutex_flag);
     return count;
 }
 
@@ -102,7 +141,6 @@ static int proc_tsk_handle(void *data)
     echo_proc_file->read_proc = proc_read_echo;
     echo_proc_file->write_proc = proc_write_echo;
 }
-
 
 char *str_tolower(const char * &str)
 {
@@ -140,6 +178,10 @@ static void netlink_tsk_handle(struct sock *sk, int len)
     int err, i, place_idle;
     char *buf_feedback;
     u32 pid;
+    mode_control_t *mode_control_tmp;
+    struct list_head *pos;
+    int flag_pid;
+    static struct nlmsghdr *nlh;
    
     while (flag_exit) {
         skb = NULL;
@@ -154,24 +196,32 @@ static void netlink_tsk_handle(struct sock *sk, int len)
         
         task = (send_task_t *)kmalloc(sizeof (send_task_t), GFP_ATOMIC);
         task->skb_task = skb_copy(skb, GFP_ATOMIC);
-        task->userpid_mod_task = (userpid_mode_t *)kmalloc(sizeof (userpid_mode_t));
-        if (task == NULL || task->skb_task == NULL || task->userpid_mod_task) {
+        nlh = (struct nlmsghdr *)task->skb_task->data;
+        if (task == NULL || task->skb_task == NULL) {
             if (task != NULL) {
                 kfree(task);
             }
             
-            if (task->userpid_mod_task != NULL) {
-                kfree(task->userpid_mod_task);
-            }
             continue;
         }
-     //   if (is global by /proc)
-    //    task->skb_task = (struct sk_buf *)kmalloc(sizeof (struct sk_buf));
-    //   memcpy(task->skb_task, skb, sizeof (struct sk_buf));
-        task->userpid_mod_task->flag_globalmode_valid = 1;
-        task->userpid_mod_task->mode_global = 1;
-        task->userpid_mod_task->mode_self = 1;
-        task->charac_handled_count = 0;
+
+        flag_pid = 0;
+        list_for_each(pos, &(mode_control.list_control)) {
+            mode_control_tmp = list_entry(pos, mode_control_t, list_control);
+            if (mode_control_tmp->pid == 0) {
+                task->mode = mode_control_tmp->mode;
+                flag_pid = 1;
+            } else {
+                if (mode_control_tmp->pid == nlh->nlmsg_pid) {
+                    task->mode = mode_control_tmp->mode;
+                    flag_pid = 1;
+                }
+            }
+        }
+
+        if (flag_pid == 0) {
+            task->mode = 1; /* default mode */
+        }
         list_add(&(task->list_send), &(send_task.list_send));
         complete(&completion_send);  
     }   
@@ -188,39 +238,23 @@ static void netlink_tsk_send(void *data)
         mutex_lock(&mutex_flag);
         list_for_each_safe(pos, pos_tmp, &send_task.list_send) {
             task_tmp = list_entry(pos, send_task_t, list_send);
-            nlh = (struct nlmsghdr *)task_tmp->skb_task->data;
-            if (task_tmp->userpid_mod_task->flag_globalmode_valid == 1) {
-                switch (task_tmp->userpid_mod_task->mode_global) {
-                case 1:
-                    break;
-                case 2:
-                    str_toupper((char *)NLMSG_DATA(nlh));
-                    break;
-                case 3:
-                    buf_feedback = str_tolower((char *)NLMSG_DATA(nlh));
-                    break;
-                default:
-                    break;
-                }
-            } else {
-                switch (task_tmp->userpid_mod_task->mode_self) {
-                case 1:
-                    break;
-                case 2:
-                    buf_feedback = str_toupper((char *)NLMSG_DATA(nlh));
-                    break;
-                case 3:
-                    buf_feedback = str_tolower((char *)NLMSG_DATA(nlh));
-                    break;
-                default:
-                    break;
-                }
+            nlh = (struct nlmsghdr *)task_tmp->skb_task->data;          
+            switch (task_tmp->mode) {
+            case 1:
+                break;
+            case 2:
+                str_toupper((char *)NLMSG_DATA(nlh));
+                break;
+            case 3:
+                str_tolower((char *)NLMSG_DATA(nlh));
+                break;
+            default:
+                break;
             }
+            
+            global_charac_handled += strlen((char *)NLMSG_DATA(nlh));
             netlink_unicast(nl_sk, task_tmp->skb_task, nlh->nlmsg_pid, 0);
             list_del(pos);
-            if (task_tmp->userpid_mod_task) {
-                free(task_tmp->userpid_mod_task);
-            }
             if (task_tmp) {
                 free(task_tmp);
             }
@@ -232,19 +266,20 @@ static void netlink_tsk_send(void *data)
 static int __init echo_init(void)
 {
     flag_exit = 1;
+    global_charac_handled = 0;
+    client_count = 0;
     mutex_init(&mutex_flag);
     INIT_HEAD_LIST(&send_task.list_send);
-    proc_tsk = kthread_run(proc_tsk_handle, NULL, "proc_tsk_handle");
+    proc_tsk_handle();
     nl_sk = netlink_kernel_create(NETLINK_TEST, netlink_tsk_handle);
-    netlink_tsk = thread_run(netlink_tsk_send, NULL, "netlink_tsk_send");    
+    netlink_tsk = kthread_run(netlink_tsk_send, NULL, "netlink_tsk_send");    
 }
 
 static void __exit echo_exit(void)
 {
     flag_exit = 0;
-    if (!IS_ERR(proc_tsk_handle)) {
-        kthread_stop(proc_tsk_handle);
-    }
+    mode_control_t *mode_control_tmp;
+    list_head *pos, *pos_tmp;
 
     if (!IS_ERR(netlink_tsk_send)) {
         kthread_stop(netlink_tsk_send);
@@ -257,7 +292,16 @@ static void __exit echo_exit(void)
     if(echo_proc_dir) {
         remove_proc_entry(ECHO_DIR, NULL);
     }
-    
+
+    list_for_each_safe(pos, pos_tmp, &mode_control.list_control) {
+        mode_control_tmp = list_entry(pos, mode_control_t, list_control);
+        if (mode_control_add->pid == 0) {
+            list_del(&(mode_control_tmp->list_control));
+            if (mode_control_tmp) {
+                free(mode_control_tmp);
+            }
+    }
+
     if (!IS_ERR(&mutex_flag)) {
         mutex_destroy(&mutex_flag);
     }
